@@ -1,27 +1,108 @@
-# kana
+# KANA
 
-`kana` is a keyboard-first terminal trainer for learning the 46 basic Japanese kana. Short adaptive sessions revisit weak characters and common confusions.
+专注五十音记忆的终端练习器：先认读一行，再回忆作答；达标自动加入下一行，也可以手动选择任意多个行。
 
-![KANA terminal trainer showing a hiragana practice card](./kana.png)
+![KANA 五十音练习卡片，来自实际 80×24 PTY 画面](./kana.png)
 
-## Why KANA?
+## 开始练习
 
-The name is literal: kana is the writing system the program trains. In Japanese, `かな` can also carry the feeling of “I wonder…”, matching the pause before answering a card. Its quiet visual mood takes a small cue from introspective yuri stories such as *Bloom Into You*; it is not connected to the franchise.
-
-## Features
-
-- Hiragana, katakana, and mixed practice
-- Adaptive review of weak kana and common confusions
-- Automatic local progress saving
-- Keyboard-first terminal interface
-
-## Build and run
-
-Go 1.24 or newer is required.
+需要 Go 1.24 或更新版本，以及支持中日文字形的终端字体。推荐终端大小为 **80×24**，最小 **28×14**；较小窗口支持滚动。
 
 ```bash
 go build -o kana ./cmd/kana
 ./kana
 ```
 
-Built with Go, [Bubble Tea](https://github.com/charmbracelet/bubbletea), [Bubbles](https://github.com/charmbracelet/bubbles), and [Lip Gloss](https://github.com/charmbracelet/lipgloss).
+在项目根目录执行以下命令，可将当前源码安装或更新为终端里的 `kana` 命令。需要 `~/.local/bin` 已在 `PATH` 中；更新不会清空学习存档。
+
+```bash
+GOBIN="$HOME/.local/bin" go install -trimpath ./cmd/kana
+kana
+```
+
+启动时显示约 1.2 秒的原创 KANA 字符画扫光动画，然后进入课程选择。方向键、`j/k` 或数字键选课，Enter 开始。使用 `--no-splash` 可跳过动画和课程选择；`NO_COLOR` 或 `TERM=dumb` 也会跳过开屏。
+
+- **入门**：先看平／片假名与罗马音对照，再练当前已解锁的行。
+- **五十音全量**：直接均匀随机练现代基础 46 音，无须从第一行重新解锁。
+- **自选行**：方向键或 `j/k` 移动，Space 或数字键勾选，支持同时练多个行，也允许提前手动加入未解锁的行。
+- **字形**：平假名、片假名、混合；两种字形共享同一组音的记忆记录。
+- **复习策略**：自适应、均匀随机、薄弱项目优先、易混淆对比。随机模式不强插错题，但仍保存学习表现。
+
+### 自动解锁
+
+顺序为 あ → か → さ → た → な → は → ま → や → ら → わ → ん。开放下一行需要：
+
+1. 本行每个音至少作答 **4 次**。
+2. 每个音当前至少**连续答对 3 次**。
+3. 每字最近 4 次作答正确率的整行平均值至少 **85%**。
+
+历史错误移出近期窗口后不再阻塞解锁，不会清空累计统计。新行加入时先展示认读对照，不会直接开始考陌生字形。重新启动后根据已保存的表现恢复自动解锁进度。
+
+在自选行页面按 `p` 可恢复自动逐行模式。手选范围和课程设置只作用于当前会话；想固定起点可使用命令行参数。
+
+## 键盘操作
+
+| 按键 | 操作 |
+| --- | --- |
+| `a–z`、`Enter` | 输入罗马音并提交 |
+| `Backspace` | 删除答案字符 |
+| `Tab` | 答案为空时切换平／片假名／混合 |
+| `Ctrl+R` | 选择课程、等级、题型和复习策略 |
+| `Ctrl+L` | 多选练习行；`1–9` 对应 あ–ら，`0` 为 わ，`-` 为 ん |
+| `Ctrl+S` | 回看当前范围的认读对照 |
+| `?` | 五章学习手册；`1–5` 或左右方向键切换章节 |
+| `↑↓` / `j/k` | 选择页上下导航；手册、认读页及其他长页面上下滚动，反馈页也支持 |
+| `PgUp` / `PgDown`、`Home` / `End` | 翻页、滚动至首尾 |
+| `Esc` | 清空答案／打开菜单／返回；自选行未确认时取消 |
+| `q` / `Ctrl+C` | 答案为空或反馈时按 q 退出；Ctrl+C 随时退出 |
+
+`j` 向下、`k` 向上。正在输入答案时，这两个键仍作为罗马音字母使用，不会触发导航；打开帮助后可用它们滚动，返回时保留未提交的答案。
+
+帮助和菜单不会丢失未提交的答案，停留时间不计入作答耗时。基础题显示短暂反馈后自动继续，也可 Enter 提前继续；词汇和语境题需要 Enter 确认下一题，方便阅读释义。
+
+基础题接受 `shi/si`、`chi/ti`、`tsu/tu`、`fu/hu`、`n/nn`；を 使用 `wo`。大小写及首尾空白忽略，不进行模糊判分。
+
+```bash
+./kana --all --mixed                 # 全部 46 音，混合字形，随机练习
+./kana --rows a,k,s --katakana        # 自选 あ、か、さ 行
+./kana --all --weak                  # 全量范围内优先练薄弱项
+./kana --all --confusion             # 易混淆对比
+./kana --level beginner --random     # 已解锁行内均匀随机
+./kana --level n2 --mixed            # N2 难度估计的词汇识读
+./kana --level n1 --exercise anime   # N1 难度估计的原创动漫风语境
+./kana --no-splash                   # 直接进入入门认读页
+./kana --stats                      # 查看统计
+./kana --stats --rows k,s            # 查看所选行的薄弱项目
+./kana --reset                      # 交互确认后重置
+./kana --help
+```
+
+## 进阶练习与资料来源
+
+内置 46 组基础假名，以及 N5–N1 每级 **12 个词汇 + 4 个语境目标词**，共 126 张卡片。每级词汇包含 6 个通常用平假名表达的词和 6 个片假名外来语。词汇题先识读单词，答题后显示例句；动漫风模式直接在句子中标出【目标词】，只需输入该词的罗马音。
+
+- 等级是编辑估计的**词汇难度**，不是假名等级、官方分级或完整 JLPT 备考课程。
+- 内容为原创练习，动漫风例句不是现有作品台词，也不冒充历年真题。
+- 混合模式按通常字形显示词汇；强制平／片假名模式属于转写练习，不表示单词通常如此书写。
+- 长音按假名拼写，如 こう → `kou`、きょう → `kyou`；片假名 ー 重复元音，如 コーヒー → `koohii`。促音双写辅音，如 がっこう → `gakkou`。ん 后接元音或 y 时可用撇号分隔，如 こんや → `kon'ya`。只接受各题明确列出的别名。
+
+已查阅 [JLPT 官方能力等级说明](https://www.jlpt.jp/e/about/levelsummary.html)、[官方样题入口](https://www.jlpt.jp/e/samples/forlearners.html)和[使用政策](https://www.jlpt.jp/e/policy.html)。官方允许部分署名教育用途，但样题可能含需另行授权的第三方作品；本项目不整体打包官方试卷。可在官方入口练 N1／N2 等各级样题，应用内 `?` 第五章也保留这些链接。
+
+## 记忆与本地存档
+
+自适应选择综合正确率、反应时间、近期错误、易混淆关系、真实时间遗忘和每题难度。正确的延迟回忆比快速重复给予更多记忆强度增益；答错后缩短间隔，并在若干题后安排回访。题数间隔负责会话内巩固，按天到期时间负责跨会话复习。算法是可解释的启发式间隔复习，**不是经过训练的 FSRS**，不承诺学习效果或预测 JLPT 成绩。
+
+每次提交后原子保存到 `$XDG_DATA_HOME/kana/progress.json`，未设置时使用 `~/.local/share/kana/progress.json`。旧版统计和基础假名 ID 保留，加载时补齐新版记忆字段；下一次提交会保存新版状态。损坏文件会旁存备份，保存失败会在练习页显示。
+
+## 开发与 CI
+
+```bash
+gofmt -w cmd internal
+go test -race ./...
+go vet ./...
+go build -o kana ./cmd/kana
+```
+
+GitHub Actions 在 Go `1.24.x` 和最新稳定版上检查格式、vet、race 测试、构建及命令行／存档 smoke。回归测试重点覆盖逐行解锁边界、多选行出题范围、近期纠错恢复、快捷键与答案隔离、窗口尺寸、时间遗忘、随机策略及旧存档迁移。
+
+基于 [Bubble Tea](https://github.com/charmbracelet/bubbletea)、[Bubbles](https://github.com/charmbracelet/bubbles) 和 [Lip Gloss](https://github.com/charmbracelet/lipgloss)。视觉与交互参考终端软件的集中式选择、键盘优先和单卡片布局；开屏与样式实现均为原创。

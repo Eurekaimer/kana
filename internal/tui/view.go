@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	kanadata "kana/internal/kana"
 	"kana/internal/trainer"
@@ -13,103 +14,109 @@ import (
 
 // View renders centered, high-contrast application surfaces.
 func (m Model) View() string {
-	var content string
-	if m.fatal != nil {
-		content = errorStyle.Render("kana: " + m.fatal.Error())
-	} else {
-		switch m.screen {
-		case screenMenu:
-			content = m.menuView()
-		case screenStats:
-			content = m.statsView()
-		case screenConfusions:
-			content = m.confusionsView()
-		case screenHelp:
-			content = m.helpView()
-		case screenOptions:
-			content = m.optionsView()
-		default:
-			content = m.trainingView()
-		}
+	if m.width < 28 || m.height < 14 {
+		return ansi.Hardwrap("KANA\n请放大终端至至少 28 × 14。\nCtrl+C 退出", max(1, m.width), true)
 	}
-	return fitVertically(content, m.height)
+	return fitVertically(m.renderPanel(m.contentView()), m.height)
+}
+
+func (m Model) contentView() string {
+	if m.fatal != nil {
+		return errorStyle.Render("kana: " + m.fatal.Error())
+	}
+	switch m.screen {
+	case screenSplash:
+		return m.splashView()
+	case screenMenu:
+		return m.menuView()
+	case screenStats:
+		return m.statsView()
+	case screenConfusions:
+		return m.confusionsView()
+	case screenHelp:
+		return m.helpView()
+	case screenOptions:
+		return m.optionsView()
+	case screenRows:
+		return m.rowsView()
+	case screenStudy:
+		return m.studyView()
+	default:
+		return m.trainingView()
+	}
 }
 
 func (m Model) trainingView() string {
-	active := m.scheduler.ActiveKana(kanadata.Basic, m.progress.States, m.progress.Confusions)
+	active := m.scheduler.ActiveKana(m.items, m.progress.States, m.progress.Confusions)
 	state := m.progress.States[m.current.ID]
-	weak := weakestItems(m.progress, 3)
-	weakSymbols := make([]string, 0, len(weak))
-	for _, item := range weak {
-		weakSymbols = append(weakSymbols, item.Symbol(m.mode, false))
+	width := m.panelContentWidth()
+	header := joinSides(titleStyle.Render("かな  KANA"), dimStyle.Render(fmt.Sprintf("%d / %d", len(active), len(m.items))), width)
+	course := levelName(m.level)
+	if m.exercise == "anime" {
+		course += " / 动漫风语境"
 	}
-
-	innerWidth := m.panelContentWidth()
-	header := joinSides(
-		titleStyle.Render("かな  KANA"),
-		dimStyle.Render(fmt.Sprintf("%d / 46", len(active))),
-		innerWidth,
-	)
-	feedback := dimStyle.Render("type the romaji")
+	if m.manualRows {
+		course = "五十音自选行"
+	}
+	feedback := dimStyle.Render("输入罗马音，Enter 确认")
 	if m.feedback == "✓" {
-		feedback = successStyle.Render("✓  correct")
+		feedback = successStyle.Render("✓  正确")
 	} else if m.feedback != "" {
 		feedback = errorStyle.Render(m.feedback)
 	}
-	cardWidth := min(34, max(14, innerWidth-6))
-	card := renderOpaque(
-		cardStyle.Width(cardWidth),
-		cardRestoreStyle,
-		strings.Join([]string{
-			kanaStyle.Copy().Bold(true).Render(m.currentSymbol()),
-			"",
-			m.input.View(),
-			feedback,
-		}, "\n"),
-	)
-	status := strings.Join([]string{
-		labelStyle.Render("ACC"),
-		fmt.Sprintf("%.0f%%", m.session.Accuracy()),
-		dimStyle.Render("│"),
-		labelStyle.Render("STREAK"),
-		fmt.Sprintf("%d", state.CurrentStreak),
-		dimStyle.Render("│"),
-		labelStyle.Render("MODE"),
-		modeName(m.mode),
-	}, " ")
-	weakLine := labelStyle.Render("WEAK") + "  " + strings.Join(weakSymbols, "  ")
-	if m.focus != trainer.FocusNormal {
-		weakLine += dimStyle.Render("  ·  " + string(m.focus) + " focus")
+	input := m.input
+	input.Width = max(8, min(28, width-10))
+	cardWidth := max(12, min(46, width-6))
+	cardLines := []string{kanaStyle.Render(m.currentSymbol()), "", input.View(), feedback}
+	card := renderOpaque(cardStyle.Width(cardWidth).Padding(0, 2), cardRestoreStyle,
+		ansi.Hardwrap(strings.Join(cardLines, "\n"), cardWidth-4, true))
+	lines := []string{header, dimStyle.Render(course), "", lipgloss.PlaceHorizontal(width, lipgloss.Center, card)}
+	if m.current.Context != "" && (m.exercise == "anime" || m.feedback != "") {
+		target := m.current.Hiragana
+		if m.mode == kanadata.ModeKatakana || (m.mode == kanadata.ModeMixed && m.katakanaVariant()) {
+			target = m.current.Katakana
+		}
+		context := strings.ReplaceAll(m.current.Context, "【"+m.current.Hiragana+"】", "【"+target+"】")
+		context = strings.ReplaceAll(context, "【"+m.current.Katakana+"】", "【"+target+"】")
+		lines = append(lines, "", context, dimStyle.Render("只输入【目标词】的罗马音"))
 	}
-	lines := []string{
-		header,
-		"",
-		lipgloss.PlaceHorizontal(innerWidth, lipgloss.Center, card),
-		"",
-		lipgloss.PlaceHorizontal(innerWidth, lipgloss.Center, status),
-		lipgloss.PlaceHorizontal(innerWidth, lipgloss.Center, weakLine),
+	if m.feedback != "" && m.current.Meaning != "" {
+		lines = append(lines, "", successStyle.Render(m.current.Primary+" · "+m.current.Meaning))
+		if m.current.ContextMeaning != "" {
+			lines = append(lines, m.current.ContextMeaning)
+		}
+		lines = append(lines, dimStyle.Render(m.current.Source), keyHints("Enter", "下一题"))
+	}
+	status := fmt.Sprintf("正确率 %.0f%%    本音连对 %d    %s", m.session.Accuracy(), state.CurrentStreak, modeName(m.mode))
+	if m.width < 44 {
+		status = fmt.Sprintf("正确率 %.0f%%   连对 %d", m.session.Accuracy(), state.CurrentStreak)
+	}
+	if m.current.Meaning == "" || m.feedback == "" {
+		lines = append(lines, "", labelStyle.Render(status), dimStyle.Render(focusName(m.focus)))
 	}
 	if m.saveError != nil {
-		lines = append(lines, errorStyle.Render("Save error: "+m.saveError.Error()))
+		lines = append(lines, errorStyle.Render("保存失败: "+m.saveError.Error()))
 	}
-	lines = append(lines, "", keyHints("Esc", "menu", "?", "help", "q", "quit"))
-	return m.renderPanel(strings.Join(lines, "\n"))
+	lines = append(lines, keyHints("Ctrl+R", "课程", "?", "手册", "Esc", "菜单"))
+	return strings.Join(lines, "\n")
 }
 
 func (m Model) menuView() string {
-	return m.decoratedPanel("Menu", []string{
-		keyLine("s", "Weak kana"),
-		keyLine("c", "Confusions"),
-		keyLine("w", "Train weakest"),
-		keyLine("r", "Training options"),
-		keyLine("?", "Help"),
-		keyLine("q", "Quit"),
-	}, keyHints("Esc", "back"))
+	return m.decoratedPanel("菜单", []string{
+		keyLine("r", "选择等级与练习模式"),
+		keyLine("s", "薄弱项目 / Weak Kana"),
+		keyLine("c", "易混淆项目"),
+		keyLine("w", "集中练习薄弱项"),
+		keyLine("g", "自选多个行"),
+		keyLine("t", "五十音认读对照"),
+		keyLine("?", "详细学习手册"),
+		keyLine("q", "保存并退出"),
+	}, keyHints("Esc", "继续练习"))
 }
 
 func (m Model) statsView() string {
 	lines := make([]string, 0, 12)
-	for index, item := range weakestItems(m.progress, 12) {
+	for index, item := range weakestItems(m.progress, m.items, 12) {
 		state := m.progress.States[item.ID]
 		average := "—"
 		if state.Attempts > 0 {
@@ -166,44 +173,32 @@ func (m Model) confusionsView() string {
 	return m.decoratedPanel("Most Confused", lines, keyHints("s", "weak kana", "Esc", "back", "q", "quit"))
 }
 
-func (m Model) helpView() string {
-	return m.decoratedPanel("Help", []string{
-		keyLine("a-z", "Type romaji"),
-		keyLine("Backspace", "Delete"),
-		keyLine("Enter", "Submit"),
-		keyLine("Tab", "Switch script"),
-		keyLine("Ctrl+R", "Training options"),
-		keyLine("Esc", "Clear / menu / back"),
-		keyLine("?", "Help"),
-		keyLine("q", "Quit with empty answer"),
-		keyLine("Ctrl+C", "Quit immediately"),
-	}, keyHints("Esc", "back"))
-}
-
 func (m Model) optionsView() string {
-	config := m.scheduler.Config()
-	progression := "all kana"
-	if config.Progressive {
-		progression = "progressive rows"
+	lines := make([]string, 0, 14)
+	for index, level := range kanadata.Levels {
+		name := levelName(level)
+		if m.manualRows && level == "gojuon" {
+			name = "五十音 · 当前自选行"
+		}
+		line := "  " + fmt.Sprintf("%d  %s", index+1, name)
+		if level == m.level {
+			line = selectedStyle.Width(m.panelContentWidth()).Render("› " + fmt.Sprintf("%d  %s", index+1, name))
+		}
+		lines = append(lines, line)
 	}
-	lines := []string{
-		labelStyle.Render("CURRENT"),
-		fmt.Sprintf("Script       %s", modeName(m.mode)),
-		fmt.Sprintf("Progression  %s", progression),
-		fmt.Sprintf("Focus        %s", m.focus),
-		"",
-		keyLine("Tab", "Cycle script"),
-		keyLine("p", "Toggle progression"),
-		keyLine("a", "All kana, normal focus"),
-		keyLine("n", "Normal adaptive focus"),
-		keyLine("w", "Weakest kana"),
-		keyLine("c", "Confused pairs"),
-	}
-	return m.decoratedPanel("Training Options", lines, keyHints("Esc", "keep settings"))
+	lines = append(lines, "",
+		keyLine("g", "自选行（支持多选）"),
+		keyLine("e", exerciseName(m.exercise)),
+		keyLine("Tab", modeName(m.mode)),
+		keyLine("n/r", "自适应 / 随机"),
+		keyLine("w/c", "薄弱 / 易混淆"),
+		dimStyle.Render("当前："+focusName(m.focus)),
+	)
+	return m.decoratedPanel("选择课程", lines, keyHints("↑↓/jk/1–7", "选择", "Enter", "开始", "?", "手册"))
 }
 
-func weakestItems(progress trainer.Progress, limit int) []kanadata.Kana {
-	items := append([]kanadata.Kana(nil), kanadata.Basic...)
+func weakestItems(progress trainer.Progress, source []kanadata.Kana, limit int) []kanadata.Kana {
+	items := append([]kanadata.Kana(nil), source...)
 	sort.SliceStable(items, func(i, j int) bool {
 		left := progress.States[items[i].ID].Weakness(progress.Confusions.Score(items[i].ID))
 		right := progress.States[items[j].ID].Weakness(progress.Confusions.Score(items[j].ID))
@@ -218,26 +213,50 @@ func weakestItems(progress trainer.Progress, limit int) []kanadata.Kana {
 func (m Model) decoratedPanel(title string, lines []string, footer string) string {
 	width := m.panelContentWidth()
 	header := joinSides(titleStyle.Render(title), dimStyle.Render("KANA"), width)
-	body := []string{header, dimStyle.Render(strings.Repeat("─", max(1, width))), ""}
+	body := []string{header, dimStyle.Render(strings.Repeat("─", max(1, width)))}
 	body = append(body, lines...)
-	body = append(body, "", footer)
-	return m.renderPanel(strings.Join(body, "\n"))
+	body = append(body, footer)
+	return strings.Join(body, "\n")
 }
 
 func (m Model) renderPanel(content string) string {
-	if m.width < 24 {
-		return renderOpaque(panelRestoreStyle, panelRestoreStyle, content)
+	width := m.panelContentWidth()
+	lines := strings.Split(ansi.Hardwrap(content, width, true), "\n")
+	available := max(1, m.height-6)
+	if len(lines) > available {
+		available = max(1, available-1)
+		offset := min(m.scroll, max(0, len(lines)-available))
+		end := min(len(lines), offset+available)
+		lines = append(lines[offset:end:end], dimStyle.Render(fmt.Sprintf("↑↓/jk %d–%d/%d", offset+1, end, len(lines))))
 	}
 	panel := renderOpaque(
-		frameStyle.Width(m.panelContentWidth()+4),
+		frameStyle.Width(width+4),
 		panelRestoreStyle,
-		content,
+		strings.Join(lines, "\n"),
 	)
 	return lipgloss.PlaceHorizontal(m.width, lipgloss.Center, panel)
 }
 
+func (m Model) maxScroll() int {
+	lines := strings.Count(ansi.Hardwrap(m.contentView(), m.panelContentWidth(), true), "\n") + 1
+	available := max(1, m.height-6)
+	if lines <= available {
+		return 0
+	}
+	return max(0, lines-max(1, available-1))
+}
+
+func (m *Model) keepVisible(line int) {
+	available := max(1, m.height-7)
+	if line < m.scroll {
+		m.scroll = line
+	} else if line >= m.scroll+available {
+		m.scroll = line - available + 1
+	}
+}
+
 func (m Model) panelContentWidth() int {
-	return max(16, min(64, m.width-8))
+	return max(18, min(70, m.width-10))
 }
 
 func joinSides(left, right string, width int) string {
@@ -270,10 +289,41 @@ func fitVertically(content string, height int) string {
 func modeName(mode kanadata.Mode) string {
 	switch mode {
 	case kanadata.ModeKatakana:
-		return "Katakana"
+		return "片假名"
 	case kanadata.ModeMixed:
-		return "Mixed"
+		return "混合"
 	default:
-		return "Hiragana"
+		return "平假名"
+	}
+}
+
+func levelName(level string) string {
+	switch level {
+	case "beginner":
+		return "入门 · 五十音逐行解锁"
+	case "gojuon":
+		return "五十音 · 46 音全量随机"
+	default:
+		return strings.ToUpper(level) + " · 进阶词汇识读"
+	}
+}
+
+func exerciseName(exercise string) string {
+	if exercise == "anime" {
+		return "动漫风语境"
+	}
+	return "假名 / 词汇识读"
+}
+
+func focusName(focus trainer.FocusMode) string {
+	switch focus {
+	case trainer.FocusRandom:
+		return "均匀随机"
+	case trainer.FocusWeak:
+		return "薄弱项目优先"
+	case trainer.FocusConfusion:
+		return "易混淆对比"
+	default:
+		return "自适应间隔复习"
 	}
 }

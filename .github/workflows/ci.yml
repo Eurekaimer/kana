@@ -1,0 +1,39 @@
+name: Go CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ['1.24.x', 'stable']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+          cache: true
+      - name: Check formatting
+        run: test -z "$(gofmt -l cmd internal)"
+      - name: Vet
+        run: go vet ./...
+      - name: Test with race detector
+        run: go test -race ./...
+      - name: Build
+        run: go build -o /tmp/kana ./cmd/kana
+      - name: Smoke CLI and storage
+        env:
+          XDG_DATA_HOME: ${{ runner.temp }}/kana-smoke
+        run: |
+          /tmp/kana --help
+          /tmp/kana --stats
+          /tmp/kana --stats --level n2 --mixed
+          /tmp/kana --stats --level n1 --exercise anime
+          /tmp/kana --stats --rows a,k,s

@@ -5,14 +5,17 @@ import (
 	"math"
 	"math/rand/v2"
 	"sort"
+	"time"
 
 	kanadata "kana/internal/kana"
 )
 
 const (
 	minimumWeight       = 0.02
-	unlockAccuracy      = 0.87
 	unlockAttempts      = 4
+	unlockRecentWindow  = 4
+	unlockStreak        = 3
+	unlockRowAccuracy   = 0.85
 	defaultWeakLimit    = 12
 	meaningfulConfusion = 2
 )
@@ -24,6 +27,7 @@ const (
 	FocusNormal    FocusMode = "normal"
 	FocusWeak      FocusMode = "weak"
 	FocusConfusion FocusMode = "confusion"
+	FocusRandom    FocusMode = "random"
 )
 
 // SchedulerConfig controls progression and focused practice.
@@ -31,6 +35,8 @@ type SchedulerConfig struct {
 	Progressive bool
 	Focus       FocusMode
 	WeakLimit   int
+	// Now supplies wall-clock time for retention weighting. Nil means time.Now.
+	Now func() time.Time
 }
 
 type reinforcement struct {
@@ -51,9 +57,13 @@ type Scheduler struct {
 }
 
 // NewScheduler creates a scheduler. A fixed seed makes tests and experiments repeatable.
+// An unset config.Now defaults to time.Now.
 func NewScheduler(seed int64, config SchedulerConfig) *Scheduler {
 	if config.WeakLimit <= 0 {
 		config.WeakLimit = defaultWeakLimit
+	}
+	if config.Now == nil {
+		config.Now = time.Now
 	}
 	return &Scheduler{rng: rand.New(rand.NewPCG(uint64(seed), uint64(seed)^0x9e3779b97f4a7c15)), config: config}
 }
@@ -89,6 +99,8 @@ func (s *Scheduler) ActiveKana(items []kanadata.Kana, states map[string]MemorySt
 			return focused
 		}
 		return weakestKana(active, states, matrix, s.config.WeakLimit)
+	case FocusRandom:
+		return active
 	default:
 		return active
 	}
@@ -96,6 +108,11 @@ func (s *Scheduler) ActiveKana(items []kanadata.Kana, states map[string]MemorySt
 
 // Weight returns the base scheduling weight for one candidate.
 func (s *Scheduler) Weight(item kanadata.Kana, state MemoryState, matrix ConfusionMatrix, questionIndex int64) float64 {
+	return s.weight(item, state, matrix, questionIndex, s.currentTime())
+}
+
+// weight is Weight with an explicit timestamp so one selection uses one clock read.
+func (s *Scheduler) weight(item kanadata.Kana, state MemoryState, matrix ConfusionMatrix, questionIndex int64, now time.Time) float64 {
 	weakness := state.Weakness(matrix.Score(item.ID))
 	weight := minimumWeight + weakness*weakness
 	if state.Attempts == 0 {
@@ -107,10 +124,38 @@ func (s *Scheduler) Weight(item kanadata.Kana, state MemoryState, matrix Confusi
 	} else {
 		weight *= 0.45
 	}
+	if state.Difficulty > 0 {
+		weight *= 1 + 0.35*clamp(state.Difficulty, 0, 1)
+	}
+	if state.Attempts > 0 && !state.LastSeen.IsZero() {
+		dueAt := state.DueAt
+		if dueAt.IsZero() {
+			days := state.IntervalDays
+			if days <= 0 {
+				days = ReviewIntervalDays(state.Stability, state.Difficulty)
+			}
+			dueAt = state.LastSeen.AddDate(0, 0, days)
+		}
+		retention := state.Retrievability(now)
+		if !now.Before(dueAt) {
+			overdueDays := now.Sub(dueAt).Hours() / 24
+			weight *= 1.35 + math.Min(overdueDays*0.15, 1.5) + 0.5*(1-retention)
+		} else {
+			weight *= 0.55 + 0.45*retention
+		}
+	}
 	if matrix.TotalFor(item.ID) >= meaningfulConfusion {
 		weight *= 1.25 + 0.5*matrix.Score(item.ID)
 	}
 	return math.Max(weight, minimumWeight)
+}
+
+// currentTime returns the injected clock, falling back safely for zero configs.
+func (s *Scheduler) currentTime() time.Time {
+	if s.config.Now != nil {
+		return s.config.Now()
+	}
+	return time.Now()
 }
 
 // Next selects a kana while normally excluding the previous two questions.
@@ -121,6 +166,17 @@ func (s *Scheduler) Next(items []kanadata.Kana, states map[string]MemoryState, m
 	}
 
 	allowed := s.avoidRecent(candidates)
+	if s.config.Focus == FocusRandom {
+		// Unbiased sampling ignores weights and pending reinforcements. History
+		// still excludes recent cards, and answers are recorded normally for a
+		// later adaptive session.
+		selected := allowed[s.rng.IntN(len(allowed))]
+		s.selectedID = selected.ID
+		s.selectedStage = 0
+		s.selectedReinforce = false
+		s.remember(selected.ID)
+		return selected, nil
+	}
 	if item, entry, ok := s.dueReinforcement(allowed, questionIndex); ok {
 		s.selectedID = item.ID
 		s.selectedStage = entry.Stage
@@ -131,8 +187,9 @@ func (s *Scheduler) Next(items []kanadata.Kana, states map[string]MemoryState, m
 
 	weights := make([]float64, len(allowed))
 	total := 0.0
+	now := s.currentTime()
 	for i, item := range allowed {
-		weights[i] = s.Weight(item, states[item.ID], matrix, questionIndex)
+		weights[i] = s.weight(item, states[item.ID], matrix, questionIndex, now)
 		total += weights[i]
 	}
 	pick := s.rng.Float64() * total
@@ -253,6 +310,11 @@ func (s *Scheduler) recentFailurePressure(id string) bool {
 	return count > 0
 }
 
+// progressiveKana unlocks rows strictly in order. A row unlocks when every kana
+// in it has at least four attempts and a current streak of at least three
+// correct answers, and the row's mean latest-four accuracy is at least 85%.
+// Old mistakes leave the four-answer window, so corrections restore an unlock
+// without erasing lifetime statistics.
 func progressiveKana(items []kanadata.Kana, states map[string]MemoryState) []kanadata.Kana {
 	unlockedRows := 1
 	for rowIndex := range len(kanadata.Rows) - 1 {
@@ -266,12 +328,12 @@ func progressiveKana(items []kanadata.Kana, states map[string]MemoryState) []kan
 			}
 			state := states[item.ID]
 			count++
-			accuracy += state.SmoothedAccuracy()
-			if state.Attempts < unlockAttempts {
+			accuracy += state.recentAccuracy(unlockRecentWindow)
+			if state.Attempts < unlockAttempts || state.CurrentStreak < unlockStreak {
 				ready = false
 			}
 		}
-		if count == 0 || !ready || accuracy/float64(count) < unlockAccuracy {
+		if count == 0 || !ready || accuracy/float64(count) < unlockRowAccuracy {
 			break
 		}
 		unlockedRows++

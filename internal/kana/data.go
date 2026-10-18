@@ -1,14 +1,20 @@
 package kana
 
-// Kana describes one basic gojuon symbol and its accepted romanizations.
+// Kana describes one review card: a basic gojuon symbol or a graded
+// vocabulary, reading, or anime-context drill.
 type Kana struct {
-	ID         string   `json:"id"`
-	Hiragana   string   `json:"hiragana"`
-	Katakana   string   `json:"katakana"`
-	Primary    string   `json:"primary"`
-	Accepted   []string `json:"accepted"`
-	Row        string   `json:"row"`
-	Confusable []string `json:"confusable,omitempty"`
+	ID             string   `json:"id"`
+	Hiragana       string   `json:"hiragana"`
+	Katakana       string   `json:"katakana"`
+	Primary        string   `json:"primary"`
+	Accepted       []string `json:"accepted"`
+	Row            string   `json:"row"`
+	Confusable     []string `json:"confusable,omitempty"`
+	Meaning        string   `json:"meaning,omitempty"`
+	Context        string   `json:"context,omitempty"`
+	ContextMeaning string   `json:"context_meaning,omitempty"`
+	Source         string   `json:"source,omitempty"`
+	NativeKatakana bool     `json:"native_katakana,omitempty"`
 }
 
 // Mode determines which script is shown in questions.
@@ -71,16 +77,6 @@ var Basic = []Kana{
 	{ID: "wa", Hiragana: "わ", Katakana: "ワ", Primary: "wa", Accepted: []string{"wa"}, Row: "w"},
 	{ID: "wo", Hiragana: "を", Katakana: "ヲ", Primary: "wo", Accepted: []string{"wo"}, Row: "w"},
 	{ID: "n", Hiragana: "ん", Katakana: "ン", Primary: "n", Accepted: []string{"n", "nn"}, Row: "nn"},
-}
-
-// ByID returns a kana by stable ID.
-func ByID(id string) (Kana, bool) {
-	for _, item := range Basic {
-		if item.ID == id {
-			return item, true
-		}
-	}
-	return Kana{}, false
 }
 
 // Symbol returns the glyph for a mode. Mixed mode uses the supplied variant bit.

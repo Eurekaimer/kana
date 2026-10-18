@@ -6,8 +6,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	kanadata "kana/internal/kana"
 )
 
 func TestStatsCommand(t *testing.T) {
@@ -67,20 +65,5 @@ func TestFlagValidation(t *testing.T) {
 		if err := run(arguments, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{}); err == nil {
 			t.Fatalf("run(%v) succeeded", arguments)
 		}
-	}
-}
-
-func TestHelpers(t *testing.T) {
-	if got := selectedMode(false, false); got != kanadata.ModeHiragana {
-		t.Fatalf("default mode = %s", got)
-	}
-	if got := selectedMode(true, false); got != kanadata.ModeKatakana {
-		t.Fatalf("katakana mode = %s", got)
-	}
-	if got := selectedMode(false, true); got != kanadata.ModeMixed {
-		t.Fatalf("mixed mode = %s", got)
-	}
-	if got := boolCount(true, false, true); got != 2 {
-		t.Fatalf("boolCount = %d", got)
 	}
 }

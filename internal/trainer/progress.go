@@ -6,7 +6,7 @@ import (
 	kanadata "kana/internal/kana"
 )
 
-const ProgressVersion = 1
+const ProgressVersion = 2
 
 // Progress is the complete session-independent learning state.
 type Progress struct {
@@ -34,10 +34,16 @@ func NewProgress(items []kanadata.Kana, now time.Time) Progress {
 }
 
 // EnsureDefaults repairs absent fields from older or partially written data.
+// Version 1 states keep every statistic and question-index due; difficulty,
+// calendar-day interval, and due time are derived from the existing evidence.
 func (p *Progress) EnsureDefaults(items []kanadata.Kana, now time.Time) {
 	p.Version = ProgressVersion
 	if p.States == nil {
 		p.States = make(map[string]MemoryState, len(items))
+	}
+	for id, state := range p.States {
+		state.repair()
+		p.States[id] = state
 	}
 	for _, item := range items {
 		if _, ok := p.States[item.ID]; !ok {

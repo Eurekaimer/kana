@@ -7,14 +7,14 @@ import (
 )
 
 var (
-	panelColor  = lipgloss.Color("#151B24")
-	cardColor   = lipgloss.Color("#202A38")
-	textColor   = lipgloss.Color("#F8FAFC")
-	accentColor = lipgloss.Color("#38BDF8")
-	mutedColor  = lipgloss.Color("#A8B3C7")
-	goodColor   = lipgloss.Color("#4ADE80")
-	badColor    = lipgloss.Color("#FB7185")
-	borderColor = lipgloss.Color("#64748B")
+	panelColor  = lipgloss.Color("#191F2C")
+	cardColor   = lipgloss.Color("#293449")
+	textColor   = lipgloss.Color("#EDF0F5")
+	accentColor = lipgloss.Color("#B5CAEA")
+	mutedColor  = lipgloss.Color("#A4ADC0")
+	goodColor   = lipgloss.Color("#A8CBA4")
+	badColor    = lipgloss.Color("#EEA6AE")
+	borderColor = lipgloss.Color("#9FA6C8")
 
 	panelRestoreStyle = lipgloss.NewStyle().
 				Foreground(textColor).
@@ -49,7 +49,7 @@ var (
 	frameStyle = lipgloss.NewStyle().
 			Foreground(textColor).
 			Background(panelColor).
-			Border(lipgloss.RoundedBorder()).
+			Border(lipgloss.DoubleBorder()).
 			BorderForeground(borderColor).
 			Padding(1, 2)
 	cardStyle = lipgloss.NewStyle().
@@ -59,6 +59,10 @@ var (
 			BorderForeground(accentColor).
 			Padding(1, 2).
 			Align(lipgloss.Center)
+	selectedStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(textColor).
+			Background(cardColor)
 )
 
 func renderOpaque(style, restore lipgloss.Style, content string) string {

@@ -1,7 +1,9 @@
 package trainer
 
 import (
+	"math"
 	"testing"
+	"time"
 
 	kanadata "kana/internal/kana"
 )
@@ -114,7 +116,15 @@ func TestProgressiveUnlocking(t *testing.T) {
 	}
 	states := make(map[string]MemoryState)
 	for _, item := range kanadata.Basic[:5] {
-		states[item.ID] = MemoryState{Attempts: 20, Correct: 19, Wrong: 1, Stability: 0.8}
+		states[item.ID] = MemoryState{
+			Attempts:      20,
+			Correct:       19,
+			Wrong:         1,
+			CurrentStreak: 19,
+			BestStreak:    19,
+			Stability:     0.8,
+			RecentResults: []bool{true, true, true, true},
+		}
 	}
 	if got := len(scheduler.ActiveKana(kanadata.Basic, states, make(ConfusionMatrix))); got != 10 {
 		t.Fatalf("unlocked active count = %d, want 10", got)
@@ -159,5 +169,234 @@ func TestRepeatedConfusionSchedulesContrast(t *testing.T) {
 	}
 	if !foundExpected || !foundContrast {
 		t.Fatalf("reinforcements = %+v", scheduler.reinforcements)
+	}
+}
+
+func TestProgressiveUnlockingBoundary(t *testing.T) {
+	scheduler := NewScheduler(1, SchedulerConfig{Progressive: true})
+
+	atThreshold := make(map[string]MemoryState)
+	for index, item := range kanadata.Basic[:5] {
+		if index < 3 {
+			atThreshold[item.ID] = MemoryState{
+				Attempts: 4, Correct: 3, Wrong: 1,
+				CurrentStreak: 3, BestStreak: 3, Stability: 0.5,
+				RecentResults: []bool{false, true, true, true},
+			}
+		} else {
+			atThreshold[item.ID] = MemoryState{
+				Attempts: 4, Correct: 4,
+				CurrentStreak: 4, BestStreak: 4, Stability: 0.5,
+				RecentResults: []bool{true, true, true, true},
+			}
+		}
+	}
+	if got := len(scheduler.ActiveKana(kanadata.Basic, atThreshold, make(ConfusionMatrix))); got != 10 {
+		t.Fatalf("row at 85%% recent accuracy = %d active, want 10", got)
+	}
+
+	belowThreshold := make(map[string]MemoryState)
+	for index, item := range kanadata.Basic[:5] {
+		if index < 4 {
+			belowThreshold[item.ID] = MemoryState{
+				Attempts: 4, Correct: 3, Wrong: 1,
+				CurrentStreak: 3, BestStreak: 3, Stability: 0.5,
+				RecentResults: []bool{false, true, true, true},
+			}
+		} else {
+			belowThreshold[item.ID] = MemoryState{
+				Attempts: 4, Correct: 4,
+				CurrentStreak: 4, BestStreak: 4, Stability: 0.5,
+				RecentResults: []bool{true, true, true, true},
+			}
+		}
+	}
+	if got := len(scheduler.ActiveKana(kanadata.Basic, belowThreshold, make(ConfusionMatrix))); got != 5 {
+		t.Fatalf("row below 85%% recent accuracy = %d active, want 5", got)
+	}
+}
+
+func TestProgressiveUnlockingRequiresFourAttempts(t *testing.T) {
+	scheduler := NewScheduler(1, SchedulerConfig{Progressive: true})
+	states := make(map[string]MemoryState)
+	for index, item := range kanadata.Basic[:5] {
+		if index == 0 {
+			states[item.ID] = MemoryState{
+				Attempts: 3, Correct: 3,
+				CurrentStreak: 3, BestStreak: 3, Stability: 0.8,
+				RecentResults: []bool{true, true, true},
+			}
+			continue
+		}
+		states[item.ID] = MemoryState{
+			Attempts: 4, Correct: 4,
+			CurrentStreak: 4, BestStreak: 4, Stability: 0.8,
+			RecentResults: []bool{true, true, true, true},
+		}
+	}
+	if got := len(scheduler.ActiveKana(kanadata.Basic, states, make(ConfusionMatrix))); got != 5 {
+		t.Fatalf("row with a three-attempt kana = %d active, want 5", got)
+	}
+}
+
+func TestProgressiveUnlockingRequiresStreak(t *testing.T) {
+	scheduler := NewScheduler(1, SchedulerConfig{Progressive: true})
+	states := make(map[string]MemoryState)
+	for index, item := range kanadata.Basic[:5] {
+		if index == 0 {
+			states[item.ID] = MemoryState{
+				Attempts: 4, Correct: 3, Wrong: 1,
+				CurrentStreak: 2, BestStreak: 2, Stability: 0.4,
+				RecentResults: []bool{true, false, true, true},
+			}
+			continue
+		}
+		states[item.ID] = MemoryState{
+			Attempts: 4, Correct: 4,
+			CurrentStreak: 4, BestStreak: 4, Stability: 0.8,
+			RecentResults: []bool{true, true, true, true},
+		}
+	}
+	if got := len(scheduler.ActiveKana(kanadata.Basic, states, make(ConfusionMatrix))); got != 5 {
+		t.Fatalf("row with a two-answer streak = %d active, want 5", got)
+	}
+}
+
+func TestProgressiveUnlockingRecoversAfterCorrection(t *testing.T) {
+	scheduler := NewScheduler(1, SchedulerConfig{Progressive: true})
+	states := make(map[string]MemoryState)
+	history := make([]bool, 12)
+	history[0], history[1] = true, true
+	for _, item := range kanadata.Basic[:5] {
+		states[item.ID] = MemoryState{
+			Attempts: 12, Correct: 2, Wrong: 10,
+			CurrentStreak: 0, BestStreak: 2, Stability: 0.3,
+			RecentResults: append([]bool(nil), history...),
+		}
+	}
+	if got := len(scheduler.ActiveKana(kanadata.Basic, states, make(ConfusionMatrix))); got != 5 {
+		t.Fatalf("uncorrected row = %d active, want 5", got)
+	}
+
+	now := time.Date(2026, 5, 1, 9, 0, 0, 0, time.UTC)
+	recordRound := func(round int) {
+		for index, item := range kanadata.Basic[:5] {
+			state := states[item.ID]
+			state.Record(true, time.Second, int64(round*5+index), now.AddDate(0, 0, round))
+			states[item.ID] = state
+		}
+	}
+	for round := range 3 {
+		recordRound(round)
+	}
+	if got := len(scheduler.ActiveKana(kanadata.Basic, states, make(ConfusionMatrix))); got != 5 {
+		t.Fatalf("partially corrected row = %d active, want 5", got)
+	}
+	recordRound(3)
+	if got := len(scheduler.ActiveKana(kanadata.Basic, states, make(ConfusionMatrix))); got != 10 {
+		t.Fatalf("corrected row = %d active, want 10", got)
+	}
+}
+
+func TestProgressiveUnlockingDoesNotSkipRows(t *testing.T) {
+	scheduler := NewScheduler(1, SchedulerConfig{Progressive: true})
+	states := make(map[string]MemoryState)
+	for _, item := range kanadata.Basic {
+		switch item.Row {
+		case kanadata.Rows[0]:
+			states[item.ID] = MemoryState{
+				Attempts: 4, Correct: 2, Wrong: 2,
+				CurrentStreak: 1, BestStreak: 1, Stability: 0.4,
+				RecentResults: []bool{true, false, false, true},
+			}
+		case kanadata.Rows[1]:
+			states[item.ID] = MemoryState{
+				Attempts: 4, Correct: 4,
+				CurrentStreak: 4, BestStreak: 4, Stability: 0.8,
+				RecentResults: []bool{true, true, true, true},
+			}
+		}
+	}
+	if got := len(scheduler.ActiveKana(kanadata.Basic, states, make(ConfusionMatrix))); got != 5 {
+		t.Fatalf("unlocked row skipped a weak first row: %d active, want 5", got)
+	}
+}
+
+func TestRandomFocusIsUnbiasedAndIgnoresReinforcement(t *testing.T) {
+	items := testKana("ki", "ku", "ke")
+	states := map[string]MemoryState{
+		"ki": {Attempts: 20, Correct: 1, Wrong: 19, Stability: 0.05, ResponseTimeEMA: 5, RecentResults: []bool{false, false, false}},
+		"ku": {Attempts: 20, Correct: 20, Stability: 1, ResponseTimeEMA: 0.6, RecentResults: []bool{true, true, true}},
+		"ke": {Attempts: 20, Correct: 20, Stability: 1, ResponseTimeEMA: 0.6, RecentResults: []bool{true, true, true}},
+	}
+	scheduler := NewScheduler(11, SchedulerConfig{Focus: FocusRandom})
+	scheduler.reinforcements = []reinforcement{{ID: "ki", Due: 0, Stage: 1}}
+
+	counts := make(map[string]int)
+	for index := range int64(3000) {
+		item, err := scheduler.Next(items, states, make(ConfusionMatrix), index)
+		if err != nil {
+			t.Fatal(err)
+		}
+		counts[item.ID]++
+	}
+	const expected = 1000.0
+	for _, item := range items {
+		if math.Abs(float64(counts[item.ID])-expected) > 150 {
+			t.Fatalf("random focus was biased: %v", counts)
+		}
+	}
+}
+
+func TestRandomFocusStillSchedulesForAdaptiveMode(t *testing.T) {
+	items := testKana("ki", "ku", "ke")
+	matrix := make(ConfusionMatrix)
+	matrix.Record("ki", "ku")
+	scheduler := NewScheduler(13, SchedulerConfig{Focus: FocusRandom})
+	scheduler.ObserveResult("ki", "ku", false, 0, matrix)
+	if len(scheduler.reinforcements) == 0 {
+		t.Fatal("random focus did not record the failed review")
+	}
+
+	scheduler.SetFocus(FocusNormal)
+	item, err := scheduler.Next(items, nil, matrix, 10)
+	if err != nil || item.ID != "ki" {
+		t.Fatalf("adaptive follow-up = %v, %v; want ki", item.ID, err)
+	}
+}
+
+func TestWeightUsesInjectedClockForDayDue(t *testing.T) {
+	reviewed := time.Date(2026, 2, 1, 8, 0, 0, 0, time.UTC)
+	state := NewMemoryState()
+	state.Record(true, time.Second, 4, reviewed)
+	item, ok := kanadata.ByID("ki")
+	if !ok {
+		t.Fatal("missing ki")
+	}
+	matrix := make(ConfusionMatrix)
+	questionIndex := state.DueIndex + 100
+
+	notDue := NewScheduler(1, SchedulerConfig{Now: func() time.Time {
+		return state.DueAt.Add(-time.Hour)
+	}})
+	overdue := NewScheduler(1, SchedulerConfig{Now: func() time.Time {
+		return state.DueAt.AddDate(0, 0, 3)
+	}})
+	if overdue.Weight(item, state, matrix, questionIndex) <= notDue.Weight(item, state, matrix, questionIndex) {
+		t.Fatal("wall-clock overdue card did not receive greater weight")
+	}
+}
+
+func TestDifficultyRaisesWeight(t *testing.T) {
+	item, ok := kanadata.ByID("ki")
+	if !ok {
+		t.Fatal("missing ki")
+	}
+	easy := MemoryState{Attempts: 8, Correct: 7, Wrong: 1, Stability: 0.7, Difficulty: 0.1, ResponseTimeEMA: 1, RecentResults: []bool{true}}
+	hard := easy
+	hard.Difficulty = 0.9
+	scheduler := NewScheduler(1, SchedulerConfig{})
+	if scheduler.Weight(item, hard, make(ConfusionMatrix), 10) <= scheduler.Weight(item, easy, make(ConfusionMatrix), 10) {
+		t.Fatal("harder card did not receive greater weight")
 	}
 }

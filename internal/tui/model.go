@@ -20,6 +20,9 @@ const (
 	screenConfusions
 	screenHelp
 	screenOptions
+	screenSplash
+	screenRows
+	screenStudy
 )
 
 // ProgressSaver is implemented by persistent storage and test doubles.
@@ -33,6 +36,10 @@ type Options struct {
 	Progressive bool
 	Focus       trainer.FocusMode
 	Seed        int64
+	Level       string
+	Exercise    string
+	NoSplash    bool
+	Rows        []string
 }
 
 // SessionStats summarizes only the current process lifetime.
@@ -60,22 +67,36 @@ func (s SessionStats) AverageResponse() time.Duration {
 
 // Model is the Bubble Tea state machine.
 type Model struct {
-	progress  trainer.Progress
-	saver     ProgressSaver
-	scheduler *trainer.Scheduler
-	mode      kanadata.Mode
-	focus     trainer.FocusMode
-	input     textinput.Model
-	current   kanadata.Kana
-	shownAt   time.Time
-	now       func() time.Time
-	screen    screen
-	feedback  string
-	width     int
-	height    int
-	session   SessionStats
-	saveError error
-	fatal     error
+	progress    trainer.Progress
+	saver       ProgressSaver
+	scheduler   *trainer.Scheduler
+	mode        kanadata.Mode
+	focus       trainer.FocusMode
+	input       textinput.Model
+	current     kanadata.Kana
+	shownAt     time.Time
+	now         func() time.Time
+	screen      screen
+	feedback    string
+	width       int
+	height      int
+	session     SessionStats
+	saveError   error
+	fatal       error
+	level       string
+	exercise    string
+	items       []kanadata.Kana
+	splashFrame int
+	helpPage    int
+	scroll      int
+	pausedAt    time.Time
+	helpReturn  screen
+	rows        map[string]bool
+	rowError    string
+	activeCount int
+	manualRows  bool
+	rowsReturn  screen
+	rowCursor   int
 }
 
 // NewModel creates a ready-to-run training model.
@@ -83,13 +104,30 @@ func NewModel(progress trainer.Progress, saver ProgressSaver, options Options) (
 	if options.Mode == "" {
 		options.Mode = kanadata.ModeHiragana
 	}
+	if options.Level == "" {
+		options.Level = "gojuon"
+		if options.Progressive {
+			options.Level = "beginner"
+		}
+	}
 	if options.Focus == "" {
 		options.Focus = trainer.FocusNormal
+		if options.Level == "gojuon" {
+			options.Focus = trainer.FocusRandom
+		}
 	}
+	if options.Exercise == "" {
+		options.Exercise = "reading"
+	}
+	items, err := kanadata.Deck(options.Level, options.Exercise)
+	if err != nil {
+		return Model{}, err
+	}
+	progress.EnsureDefaults(items, time.Now())
 	input := textinput.New()
 	input.Prompt = "> "
-	input.CharLimit = 12
-	input.Width = 16
+	input.CharLimit = 80
+	input.Width = 28
 	input.PromptStyle = keyStyle.Copy().Background(cardColor)
 	input.TextStyle = cardInputStyle
 	input.PlaceholderStyle = dimStyle.Copy().Background(cardColor)
@@ -101,25 +139,47 @@ func NewModel(progress trainer.Progress, saver ProgressSaver, options Options) (
 		progress: progress,
 		saver:    saver,
 		scheduler: trainer.NewScheduler(options.Seed, trainer.SchedulerConfig{
-			Progressive: options.Progressive,
+			Progressive: options.Level == "beginner",
 			Focus:       options.Focus,
 		}),
-		mode:   options.Mode,
-		focus:  options.Focus,
-		input:  input,
-		now:    time.Now,
-		screen: screenTraining,
-		width:  80,
-		height: 24,
+		mode:     options.Mode,
+		focus:    options.Focus,
+		input:    input,
+		now:      time.Now,
+		screen:   screenTraining,
+		width:    80,
+		height:   24,
+		level:    options.Level,
+		exercise: options.Exercise,
+		items:    items,
 	}
 	if err := model.selectNext(); err != nil {
 		return Model{}, err
+	}
+	if len(options.Rows) > 0 {
+		model.rows = make(map[string]bool, len(options.Rows))
+		for _, row := range options.Rows {
+			if !validRow(row) {
+				return Model{}, fmt.Errorf("unknown kana row %q", row)
+			}
+			model.rows[row] = true
+		}
+		if err := model.applyRows(); err != nil {
+			return Model{}, err
+		}
+	}
+	if !options.NoSplash {
+		model.screen = screenSplash
+		model.pausedAt = model.now()
 	}
 	return model, nil
 }
 
 // Init satisfies tea.Model.
 func (m Model) Init() tea.Cmd {
+	if m.screen == screenSplash {
+		return tea.Batch(textinput.Blink, splashTick())
+	}
 	return textinput.Blink
 }
 
@@ -138,7 +198,7 @@ func (m Model) Summary() string {
 	if m.session.Questions == 0 {
 		return ""
 	}
-	weak := weakestItems(m.progress, 3)
+	weak := weakestItems(m.progress, m.items, 3)
 	weakSymbols := ""
 	for _, item := range weak {
 		if weakSymbols != "" {
@@ -164,7 +224,7 @@ func (m Model) Summary() string {
 }
 
 func (m *Model) selectNext() error {
-	item, err := m.scheduler.Next(kanadata.Basic, m.progress.States, m.progress.Confusions, m.progress.QuestionIndex)
+	item, err := m.scheduler.Next(m.items, m.progress.States, m.progress.Confusions, m.progress.QuestionIndex)
 	if err != nil {
 		return err
 	}
@@ -172,12 +232,18 @@ func (m *Model) selectNext() error {
 	m.input.SetValue("")
 	m.feedback = ""
 	m.shownAt = m.now()
+	m.pausedAt = time.Time{}
+	active := m.scheduler.ActiveKana(m.items, m.progress.States, m.progress.Confusions)
+	if m.level == "beginner" && len(active) > m.activeCount {
+		m.screen = screenStudy
+		m.pausedAt = m.now()
+	}
+	m.activeCount = len(active)
 	return nil
 }
 
 func (m Model) currentSymbol() string {
-	katakanaVariant := m.progress.QuestionIndex%2 == 1
-	return m.current.Symbol(m.mode, katakanaVariant)
+	return m.current.Symbol(m.mode, m.katakanaVariant())
 }
 
 func (m *Model) cycleMode() {
@@ -194,4 +260,49 @@ func (m *Model) cycleMode() {
 func (m *Model) setFocus(focus trainer.FocusMode) {
 	m.focus = focus
 	m.scheduler.SetFocus(focus)
+}
+
+func (m Model) katakanaVariant() bool {
+	if m.level != "beginner" && m.level != "gojuon" {
+		return m.current.NativeKatakana
+	}
+	return m.progress.QuestionIndex%2 == 1
+}
+
+func (m *Model) openPanel(target screen) {
+	if target == screenHelp {
+		m.helpReturn = m.screen
+	}
+	if m.screen == screenTraining {
+		m.pausedAt = m.now()
+	}
+	m.screen = target
+	m.scroll = 0
+}
+
+func (m *Model) resumeTraining() {
+	if !m.pausedAt.IsZero() {
+		m.shownAt = m.shownAt.Add(m.now().Sub(m.pausedAt))
+	}
+	m.pausedAt = time.Time{}
+	m.screen = screenTraining
+	m.scroll = 0
+}
+
+func (m *Model) setCourse(level, exercise string) error {
+	items, err := kanadata.Deck(level, exercise)
+	if err != nil {
+		return err
+	}
+	m.level, m.exercise, m.items = level, exercise, items
+	m.activeCount = 0
+	m.rows = nil
+	m.manualRows = false
+	m.scheduler.SetProgressive(level == "beginner")
+	if level == "gojuon" {
+		m.setFocus(trainer.FocusRandom)
+	} else {
+		m.setFocus(trainer.FocusNormal)
+	}
+	return m.selectNext()
 }
